@@ -35,7 +35,10 @@ class ResumeViewSet(DefaultsMixin, ModelViewSet):
     def perform_create(self, serializer):
         uploaded_file = self.request.data.get('datafile')
         serializer.save(datafile=uploaded_file)
-        raw_text = cvparser.convert_pdf_to_txt(uploaded_file)
+        if uploaded_file.name.endswith('docx'):
+            raw_text = cvparser.convert_docx_to_txt(uploaded_file)
+        else:
+            raw_text = cvparser.convert_pdf_to_txt(uploaded_file)
         resume = {
             'name': cvparser.extract_name(raw_text),
             'email': cvparser.exract_email(raw_text),
@@ -45,7 +48,7 @@ class ResumeViewSet(DefaultsMixin, ModelViewSet):
             'zipcode': cvparser.extract_zip(raw_text),
             'education': ', '.join(cvparser.extract_edu_info(raw_text)),
             'degree': ', '.join(cvparser.extract_degree_info(raw_text)),
-            'work_history': cvparser.extract_company_info(raw_text),
+            'work_history': ', '.join(cvparser.extract_company_info(raw_text)),
             'skills': ', '.join(cvparser.extract_skills(raw_text)),
             'file_id': serializer.data['id']
         }
