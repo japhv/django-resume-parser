@@ -36,22 +36,23 @@ class ResumeViewSet(DefaultsMixin, ModelViewSet):
         uploaded_file = self.request.data.get('datafile')
         serializer.save(datafile=uploaded_file)
         if uploaded_file.name.endswith('docx'):
-            raw_text = cvparser.convert_docx_to_txt(uploaded_file)
+            resume_lines = cvparser.convert_docx_to_txt(uploaded_file)
         else:
-            raw_text = cvparser.convert_pdf_to_txt(uploaded_file)
+            resume_lines = cvparser.convert_pdf_to_txt(uploaded_file)
         resume = {
-            'name': cvparser.extract_name(raw_text),
-            'email': cvparser.exract_email(raw_text),
-            'phone_number': cvparser.extract_phone_number(raw_text),
-            'street_address': cvparser.extract_address(raw_text),
-            'state': cvparser.extract_state(raw_text),
-            'zipcode': cvparser.extract_zip(raw_text),
-            'education': ', '.join(cvparser.extract_edu_info(raw_text)),
-            'degree': ', '.join(cvparser.extract_degree_info(raw_text)),
-            'work_history': ', '.join(cvparser.extract_company_info(raw_text)),
-            'skills': ', '.join(cvparser.extract_skills(raw_text)),
+            'name': cvparser.extract_name(resume_lines),
+            'email': cvparser.extract_email(resume_lines),
+            'phone_number': cvparser.extract_phone_number(resume_lines),
+            'street_address': cvparser.extract_address(resume_lines),
+            'state': cvparser.extract_state(resume_lines),
+            'zipcode': cvparser.extract_zip(resume_lines),
+            'education': ', '.join(cvparser.extract_edu_info(resume_lines)),
+            'degree': ', '.join(cvparser.extract_degree_info(resume_lines)),
+            'work_history': ', '.join(cvparser.extract_company_info(resume_lines)),
+            'skills': ', '.join(cvparser.extract_skills(resume_lines)),
             'file_id': serializer.data['id']
         }
+        cvparser.print_distance(resume['name'], resume['email'])
         resume_serializer = ResumeSerializer(data=resume)
         if resume_serializer.is_valid():
             resume_serializer.save()

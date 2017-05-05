@@ -18,14 +18,59 @@ from elasticsearch import Elasticsearch
 
 import sqlite3
 
+conn = sqlite3.connect('respars.sqlite3')
+skills = [s[1] for s in conn.execute("SELECT * FROM SKILLS")]
+conn.close()
+
+import editdistance
+
 logging.basicConfig(level=logging.ERROR)
 
-conn = sqlite3.connect('respars.sqlite3')
-university = [u[0] for u in conn.execute("SELECT * from UNIVERSITIES")]
-company = [c[0] for c in conn.execute("SELECT * from COMPANIES")]
-degree = [{'abbr': d[0], 'title': d[1]} for d in conn.execute("SELECT * from DEGREE")]
-skills = [s[1].lower() for s in conn.execute("SELECT * FROM SKILLS")]
-conn.close()
+work_headers = (
+    'work experience',
+    'professional experience',
+    'professional summary',
+    'experience',
+    'projects',
+    'project details',
+    'career summary',
+)
+
+education_headers = (
+    'education',
+    'educational',
+    'qualifications',
+)
+
+header_indices = {
+    'education': 0,
+    'work': 0
+}
+
+
+def _ismatch(matchlist, search_string):
+    search_string = search_string.lower()
+    for item in matchlist:
+        if item in search_string:
+            return True
+    return False
+
+
+def _get_header_idx(string_to_search, header_list):
+    for header in header_list:
+        for idx, line in enumerate(string_to_search):
+            cond1 = len(line.split()) < 5
+            cond2 = header in line.lower()
+            if cond1 and cond2:
+                return idx
+    return 0
+
+
+def _get_segment(string_to_search, start_idx, end_idx):
+    if start_idx < end_idx:
+        return string_to_search[start_idx: end_idx]
+    else:
+        return string_to_search[start_idx:]
 
 
 def convert_docx_to_txt(docx_file):
@@ -37,14 +82,21 @@ def convert_docx_to_txt(docx_file):
         :type docx_file: InMemoryUploadedFile
         :return: The text contents of the docx file
         :rtype: str
-        """
+    """
     try:
-        text = docx2txt.process(docx_file)
-        clean_text = text.replace("\r", "\n").replace("\n", " ").replace("\t", " ")
-        return clean_text
+        text = docx2txt.process(docx_file)  # Extract text from docx file
+        clean_text = text.replace("\r", "\n").replace("\t", " ")  # Normalize text blob
+        resume_lines = clean_text.splitlines()  # Split text blob into individual lines
+        resume_lines = [line.strip() for line in resume_lines if line.strip()]  # Remove empty strings and whitespaces
+
+        # Set header indices
+        header_indices['education'] = _get_header_idx(resume_lines, education_headers)
+        header_indices['work'] = _get_header_idx(resume_lines, work_headers)
+
+        return resume_lines
     except Exception as e:
-        logging.error('Error in file: ' + str(e))
-        return ''
+        logging.error('Error in docx file:: ' + str(e))
+        return []
 
 
 def convert_pdf_to_txt(pdf_file):
@@ -78,26 +130,62 @@ def convert_pdf_to_txt(pdf_file):
 
         # Normalize a bit, removing line breaks
         full_string = full_string.replace("\r", "\n")
-        full_string = full_string.replace("\n", " ")
+        full_string = full_string.replace("\t", " ")
 
         # Remove awkward LaTeX bullet characters
         full_string = re.sub(r"\(cid:\d{0,2}\)", " ", full_string)
-        return full_string
+
+        # Split text blob into individual lines
+        resume_lines = full_string.splitlines(True)
+
+        # Remove empty strings and whitespaces
+        resume_lines = [re.sub('\s+', ' ', line.strip()) for line in resume_lines if line.strip()]
+
+        # Set header indices
+        header_indices['education'] = _get_header_idx(resume_lines, education_headers)
+        header_indices['work'] = _get_header_idx(resume_lines, work_headers)
+
+        return resume_lines
 
     except Exception as e:
-        logging.error('Error in file: ' + str(e))
-        return ''
+        logging.error('Error in pdf file:: ' + str(e))
+        return []
+
+
+def extract_name(string_to_search):
+    """
+       Find name in the string_to_search
+       :param string_to_search: A string to check for a name
+       :type string_to_search: str
+       :return: A string containing the name, or None if no name is found.
+       :rtype: str
+    """
+    try:
+        string_to_search = _get_segment(string_to_search, 0, min(header_indices['education'], header_indices['work']))
+        name_pattern = re.compile(r"^([A-Za-z\u00E9-\u00F8\.][\s]*)+$")
+        name = ''
+        for line in string_to_search:
+            if name_pattern.match(line):
+                name = line
+                break
+
+        return name
+
+    except Exception as e:
+        logging.error('Issue parsing name:: ' + str(e))
+        return None
 
 
 def extract_phone_number(string_to_search):
     """
-    Find first phone number in the string_to_search
-    :param string_to_search: A string to check for a phone number in
-    :type string_to_search: str
-    :return: A string containing the first phone number, or None if no phone number is found.
-    :rtype: str
+        Find first phone number in the string_to_search
+        :param string_to_search: A string to check for a phone number in
+        :type string_to_search: str
+        :return: A string containing the first phone number, or None if no phone number is found.
+        :rtype: str
     """
     try:
+        string_to_search = _get_segment(string_to_search, 0, min(header_indices['education'], header_indices['work']))
         regular_expression = re.compile(r"\(?"  # open parenthesis
                                         r"(\d{3})?"  # area code
                                         r"\)?"  # close parenthesis
@@ -106,17 +194,20 @@ def extract_phone_number(string_to_search):
                                         r"[\s\.-]{0,2}"  # separator bbetween 3 digit exchange, 4 digit local
                                         r"(\d{4})",  # 4 digit local
                                         re.IGNORECASE)
-        result = re.search(regular_expression, string_to_search)
-        if result:
-            result = result.groups()
-            result = "-".join(result)
-        return result
+        for line in string_to_search:
+            result = re.search(regular_expression, line)
+            if result:
+                result_groups = result.groups()
+                phone_no = "-".join(result_groups)
+                return phone_no
+
+        return None
     except Exception as e:
-        logging.error('Issue parsing phone number: ' + string_to_search + str(e))
+        logging.error('Issue parsing phone number:: ' + str(e))
         return None
 
 
-def exract_email(string_to_search):
+def extract_email(string_to_search):
     """
        Find first email address in the string_to_search
        :param string_to_search: A string to check for an email address in
@@ -125,13 +216,16 @@ def exract_email(string_to_search):
        :rtype: str
        """
     try:
-        regular_expression = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,4}", re.IGNORECASE)
-        result = re.search(regular_expression, string_to_search)
-        if result:
-            result = result.group()
-        return result
+        string_to_search = _get_segment(string_to_search, 0, min(header_indices['education'], header_indices['work']))
+        email_pattern = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,4}", re.IGNORECASE)
+        for line in string_to_search:
+            result = re.search(email_pattern, line)
+            if result:
+                result_groups = result.group()
+                return result_groups
+
     except Exception as e:
-        logging.error('Issue parsing email number: '  + str(e))
+        logging.error('Issue parsing email number: ' + str(e))
         return None
 
 
@@ -144,13 +238,14 @@ def extract_address(string_to_search):
        :rtype: str
     """
     try:
-        result = re.search(street_address, string_to_search)
-        if result:
-            result = result.group().strip(',')
-
-        return result
+        string_to_search = _get_segment(string_to_search, 0, min(header_indices['education'], header_indices['work']))
+        for line in string_to_search:
+            result = re.search(street_address, line)
+            if result:
+                str_addr = result.group().strip(',')
+                return str_addr
     except Exception as e:
-        logging.error('Issue parsing address: ' + string_to_search + str(e))
+        logging.error('Issue parsing address:: ' + str(e))
         return None
 
 
@@ -163,17 +258,20 @@ def extract_state(string_to_search):
        :rtype: str
     """
     try:
+        string_to_search = _get_segment(string_to_search, 0, min(header_indices['education'], header_indices['work']))
         states = ['AK', 'AL', 'AR', 'AZ', 'CA', 'CO', 'CT', 'DC', 'DE', 'FL', 'GA', 'HI', 'IA', 'ID',
                   'IL', 'IN', 'KS', 'KY', 'LA', 'MA', 'MD', 'ME', 'MI', 'MN', 'MO', 'MS', 'MT', 'NC', 'ND', 'NE',
                   'NH', 'NJ', 'NM', 'NV', 'NY', 'OH', 'OK', 'OR', 'PA', 'PR', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT',
                   'VA', 'VT', 'WA', 'WI', 'WV', 'WY']
-        result = re.compile(r'\b(' + '|'.join(states) + r')\b')
-        result = result.findall(string_to_search)[0]
-        if result:
-            return result
-        return ""
+        state_pattern = re.compile(r'\b(' + '|'.join(states) + r')\b')
+        for line in string_to_search:
+            result = state_pattern.search(line)
+            if result:
+               return result.group()
+
+        return None
     except Exception as e:
-        logging.error('Issue parsing address:: ' + str(e))
+        logging.error('Issue parsing state:: ' + str(e))
         return None
 
 
@@ -186,9 +284,13 @@ def extract_zip(string_to_search):
        :rtype: str
     """
     try:
-        zip_code = re.findall("[\s-][0-9]{5}[\s,]", string_to_search)
-        if zip_code:
-            return re.findall("[0-9]{5}", zip_code[0])[0]
+        string_to_search = _get_segment(string_to_search, 0, min(header_indices['education'], header_indices['work']))
+        for line in string_to_search:
+            result = re.search("[\s-][0-9]{5}[\s,.]|[\s-][0-9]{5}$", line)
+            if result:
+                result_group = result.group()
+                zip_code = re.search(r"[0-9]{5}", result_group).group()
+                return zip_code
         return None
 
     except Exception as e:
@@ -196,68 +298,58 @@ def extract_zip(string_to_search):
         return None
 
 
-def extract_name(string_to_search):
-    """
-       Find name in the string_to_search
-       :param string_to_search: A string to check for a name
-       :type string_to_search: str
-       :return: A string containing the name, or None if no name is found.
-       :rtype: str
-    """
-    try:
-        nameRegex = "[A-Za-z\u00E9-\u00F8]+\s+[A-Za-z\u00E9-\u00F8]+"
-        nameSearch = re.findall(nameRegex, string_to_search)
-        return nameSearch[0]
-
-    except Exception as e:
-        logging.error('Issue parsing name:: ' + str(e))
-        return None
-
-
 def extract_edu_info(string_to_search):
     try:
-        start_idx = string_to_search.lower().find('education')
-        if start_idx != -1:
-            start_idx += 10
-            end_idx = start_idx + 450
-            string_to_search = string_to_search[start_idx: end_idx]
-            string_to_search = ' '.join(string_to_search.split())
-
         es = Elasticsearch()
-        body = {
-            "query": {
-                "match": {
-                    "name": string_to_search
+        universities = []
+        university_words = ('university', 'institute', 'college')
+
+        string_to_search = _get_segment(string_to_search, header_indices['education'], header_indices['work'])
+
+        for line in string_to_search:
+
+            if not _ismatch(university_words, line):
+                continue
+
+            body = {
+                "query": {
+                    "match": {
+                        "name": line
+                    }
                 }
             }
-        }
-        filter_results = es.search(index='universities', doc_type="university", body=body,
-                                   filter_path=['hits.hits._source.name', 'hits.hits._score', 'hits.total'])
-        university_list = []
-        for doc in filter_results['hits']['hits']:
-            university_list.append(doc['_source']['name'])
+            filter_results = es.search(index='universities', doc_type="university", body=body,
+                                       filter_path=['hits.hits._source.name', 'hits.hits._score', 'hits.total'])
 
-        universities = [ut for ut in university_list if re.search(ut, string_to_search)]
+            if not filter_results['hits']['total']:
+                continue
 
-        if not universities:
-            for u in university_list:
-                u_temp = u.lower().replace('the', '')
-                if 'at' in u_temp:
-                    u_split = u_temp.split('at')
-                else:
-                    u_split = u_temp.split(',')
+            university_list = []
+            for doc in filter_results['hits']['hits']:
+                university_list.append(doc['_source']['name'])
 
-                u_name = u_split[0]
-                if len(u_split) > 1:
-                    u_loc = u_split[1]
-                else:
-                    u_loc = ' '
+            univ_found = [ut for ut in university_list if re.search(ut, line)]
 
-                if u_name in string_to_search.lower() and u_loc in string_to_search.lower():
-                    universities.append(u)
+            if not univ_found:
+                for u in university_list:
+                    u_temp = u.lower().replace('the', '')
+                    if 'at' in u_temp:
+                        u_split = u_temp.split('at')
+                    else:
+                        u_split = u_temp.split(',')
 
+                    u_name = u_split[0]
+                    if len(u_split) > 1:
+                        u_loc = u_split[1]
+                    else:
+                        u_loc = ' '
 
-        return universities
+                    if u_name in line.lower() and u_loc in line.lower():
+                        univ_found.append(u)
+
+            universities += univ_found
+
+        return list(set(universities))
 
     except Exception as e:
         logging.error('Issue extracting education info:: ' + str(e))
@@ -266,83 +358,87 @@ def extract_edu_info(string_to_search):
 
 def extract_degree_info(string_to_search):
     try:
-        start_idx = string_to_search.lower().find('education')
-        if start_idx != -1:
-            start_idx += 10
-            end_idx = start_idx + 500
-            string_to_search = string_to_search[start_idx: end_idx]
-
-        # degrees = [d['abbr'] for d in degree if re.search(d['abbr'], string_to_search)
-        #                  or re.search(d['title'], string_to_search)]
         degrees = []
-        lc_string = string_to_search.lower()
-        if 'bachelor' in lc_string or ' b.' in lc_string or ' bs ' in lc_string :
-            degrees.append('BS')
-        if 'master' in lc_string or ' m.' in lc_string or ' ms ' in lc_string:
-            degrees.append('MS')
-        if 'doctorate' in lc_string or 'doctor of philosophy' in lc_string or 'ph.d.' in lc_string :
-            degrees.append('Ph.D.')
+        string_to_search = _get_segment(string_to_search, header_indices['education'], header_indices['work'])
 
-        return degrees
+        for line in string_to_search:
+            if len(line.split()) > 15:
+                continue
+
+            if 'Bachelor' in line or 'B.' in line or 'BS' in line:
+                degrees.append('BS')
+            if 'Master' in line or 'M.' in line or 'MS' in line:
+                degrees.append('MS')
+            if 'Doctorate' in line or 'Doctor of Philosophy' in line or 'Ph.d.' in line :
+                degrees.append('Ph.D.')
+            if 'MBA' in line:
+                degrees.append('MBA')
+
+        return list(set(degrees))
 
     except Exception as e:
         logging.error('Issue extracting degree info:: ' + str(e))
-        return None
+        return []
 
 
 def extract_company_info(string_to_search):
     try:
         es = Elasticsearch()
-        company_list = []
-        stop_words = set(stopwords.words('english'))
-        stop_words.update(['.', ',', '"', "'", '?', '!', ':', ';', '(', ')', '[', ']', '{', '}'])
-        stop_words.update(["corporation", "company", "incorporated", "limited", "co", "ltd"
-                           "corp", "inc", "llc", "lc", "llp", "psc", "pllc", "plc", "sales", "Sales"])
-        sub_headers = (
-            'work experience',
-            'professional experience',
-            'professional summary',
-            'experience',
-            'projects',
-            'project details',
-            'career summary'
-        )
-        processed_text = ([text for text in word_tokenize(string_to_search) if text not in stop_words
-                           and text[0].isupper()])
+        companies = []
 
-        string_to_search = ' '.join(processed_text).lower()
+        es = Elasticsearch()
+        lc_skills = [s.lower() for s in skills]
+        spl_chars = ['.', ',', '"', "'", '?', '!', ':', ';', '(', ')', '[', ']', '{', '}']
+        company_suffixes = ["corporation", "company", "incorporated", "limited", "co", "ltd"
+                            "corp", "inc", "llc", "lc", "llp",
+                            "psc", "pllc", "plc"]
+        stop_words = set()
+        stop_words.update(spl_chars)
+        stop_words.update(company_suffixes)
 
-        for header in sub_headers:
-            start_idx = string_to_search.find(header)
-            if start_idx != -1:
-                start_idx += len(header)
-                string_to_search = string_to_search[start_idx:]
-                break
+        string_to_search = _get_segment(string_to_search, header_indices['work'], header_indices['education'])
 
-        we_keywords = string_to_search.split(' ')
-        we_chunks = [we_keywords[x:x + 10] for x in range(0, len(we_keywords), 10)]
+        for line in string_to_search:
 
-        for chuck in we_chunks:
+            if len(line.split()) > 10:
+                continue
+
             body = {
                 "query": {
                     "match": {
-                        "name": ' '.join(chuck)
+                        "name": line
                     }
                 }
             }
             filter_results = es.search(index='companies', doc_type="company", body=body,
                                        filter_path=['hits.hits._source.name', 'hits.hits._score', 'hits.total'])
 
+            if not filter_results['hits']['total']:
+                continue
+
+            company_list = []
             for doc in filter_results['hits']['hits']:
                 company_list.append(doc['_source']['name'])
 
-        worked_companies = []
-        for c in company_list:
-            processed_c = ' '.join([word for word in word_tokenize(c.lower()) if word not in stop_words])
-            if processed_c in string_to_search:
-                worked_companies.append(c)
+            worked_companies = []
+            for c in company_list:
+                tokenized_c = word_tokenize(c.lower())
+                processed_c = ' '.join([word for word in tokenized_c if word not in stop_words])
+                if processed_c in line.lower():
+                    # TODO: Rewrite skills detection logic
+                    cond1 = [t for t in tokenized_c if t in lc_skills]
+                    if not cond1:
+                        worked_companies.append(c)
+                        continue
+                    spl_chars_regex = re.compile('|'.join(map(re.escape, spl_chars)))
+                    processed_c2 = spl_chars_regex.sub("", c.lower())
+                    cond2 = processed_c2 in line.lower()
+                    if cond1 and cond2:
+                        worked_companies.append(c)
 
-        return worked_companies
+            companies += worked_companies
+
+        return list(set(companies))
 
     except Exception as e:
         logging.error('Issue extracting company info:: ' + str(e))
@@ -353,6 +449,18 @@ def extract_skills(string_to_search):
 
     stop_words = set(stopwords.words('english'))
     stop_words.update(['.', ',', '"', "'", '?', '!', ':', ';', '(', ')', '[', ']', '{', '}'])
-    processed_text = [text.lower() for text in word_tokenize(string_to_search) if text not in stop_words]
-    found_skills = [s for s in skills if s in processed_text]
-    return found_skills
+    found_skills = []
+    for line in string_to_search:
+        processed_text = [text.lower() for text in word_tokenize(line) if text not in stop_words]
+        found_skills += [s for s in skills if s.lower() in processed_text and s not in found_skills]
+    return list(set(found_skills))
+
+
+def print_distance(name, email):
+    print('\n==================')
+    name = name.replace(' ', '').lower()
+    if email:
+        email = email.split('@')[0]
+        email = re.sub(r'[\.-_0-9]+', '', email)
+        print('Distance between ' + name + ' and '+ email + ' is ' + str(editdistance.eval(name, email)))
+    print('==================\n')
