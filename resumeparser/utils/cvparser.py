@@ -16,10 +16,12 @@ from nltk.tokenize import word_tokenize
 
 from elasticsearch import Elasticsearch
 
+import csv
 import sqlite3
 
 conn = sqlite3.connect('respars.sqlite3')
 skills = [s[1] for s in conn.execute("SELECT * FROM SKILLS")]
+ignore_words = [iw[0] for iw in conn.execute("SELECT IgnoreWord FROM ignore_words")]
 conn.close()
 
 import editdistance
@@ -59,11 +61,16 @@ def _ismatch(matchlist, search_string):
 def _get_header_idx(string_to_search, header_list):
     for header in header_list:
         for idx, line in enumerate(string_to_search):
-            cond1 = len(line.split()) < 5
-            cond2 = header in line.lower()
+            cond1 = len(line.split()) < 5  # Line contains less than 5 words
+            cond2 = header in line.lower()  # header is present in the line
             if cond1 and cond2:
-                return idx
+                return idx  # Return the index of the line
     return 0
+
+
+def _set_header_indices(resume_lines):
+    header_indices['education'] = _get_header_idx(resume_lines, education_headers)
+    header_indices['work'] = _get_header_idx(resume_lines, work_headers)
 
 
 def _get_segment(string_to_search, start_idx, end_idx):
@@ -90,8 +97,7 @@ def convert_docx_to_txt(docx_file):
         resume_lines = [line.strip() for line in resume_lines if line.strip()]  # Remove empty strings and whitespaces
 
         # Set header indices
-        header_indices['education'] = _get_header_idx(resume_lines, education_headers)
-        header_indices['work'] = _get_header_idx(resume_lines, work_headers)
+        _set_header_indices(resume_lines)
 
         return resume_lines
     except Exception as e:
@@ -142,8 +148,7 @@ def convert_pdf_to_txt(pdf_file):
         resume_lines = [re.sub('\s+', ' ', line.strip()) for line in resume_lines if line.strip()]
 
         # Set header indices
-        header_indices['education'] = _get_header_idx(resume_lines, education_headers)
-        header_indices['work'] = _get_header_idx(resume_lines, work_headers)
+        _set_header_indices(resume_lines)
 
         return resume_lines
 
@@ -162,7 +167,7 @@ def extract_name(string_to_search):
     """
     try:
         string_to_search = _get_segment(string_to_search, 0, min(header_indices['education'], header_indices['work']))
-        name_pattern = re.compile(r"^([A-Za-z\u00E9-\u00F8\.][\s]*)+$")
+        name_pattern = re.compile(r"^([A-Za-z\u00E9-\u00F8\.-][\s]*)+$")
         name = ''
         for line in string_to_search:
             if name_pattern.match(line):
@@ -304,7 +309,8 @@ def extract_edu_info(string_to_search):
         universities = []
         university_words = ('university', 'institute', 'college')
 
-        string_to_search = _get_segment(string_to_search, header_indices['education'], header_indices['work'])
+        string_to_search = _get_segment(string_to_search, header_indices['education'],
+                                        header_indices['work'])
 
         for line in string_to_search:
 
@@ -332,9 +338,9 @@ def extract_edu_info(string_to_search):
 
             if not univ_found:
                 for u in university_list:
-                    u_temp = u.lower().replace('the', '')
+                    u_temp = u.replace('The ', '')
                     if 'at' in u_temp:
-                        u_split = u_temp.split('at')
+                        u_split = u_temp.split(' at ')
                     else:
                         u_split = u_temp.split(',')
 
@@ -344,8 +350,10 @@ def extract_edu_info(string_to_search):
                     else:
                         u_loc = ' '
 
-                    if u_name in line.lower() and u_loc in line.lower():
+                    if u_name.lower() in line.lower() and u_loc.lower() in line.lower():
                         univ_found.append(u)
+                    elif u_name.lower() in line.lower():
+                        univ_found.append(u_name)
 
             universities += univ_found
 
@@ -380,6 +388,9 @@ def extract_degree_info(string_to_search):
         logging.error('Issue extracting degree info:: ' + str(e))
         return []
 
+def _process_txt(tokens, stop_words):
+    return ' '.join([word for word in tokens if word not in stop_words])
+
 
 def extract_company_info(string_to_search):
     try:
@@ -403,6 +414,8 @@ def extract_company_info(string_to_search):
             if len(line.split()) > 10:
                 continue
 
+            line = _process_txt(word_tokenize(line.lower()), ignore_words + spl_chars)
+
             body = {
                 "query": {
                     "match": {
@@ -422,17 +435,29 @@ def extract_company_info(string_to_search):
 
             worked_companies = []
             for c in company_list:
+                # Split company name into tokens
                 tokenized_c = word_tokenize(c.lower())
-                processed_c = ' '.join([word for word in tokenized_c if word not in stop_words])
-                if processed_c in line.lower():
+                # Company name without punctuations or suffixes
+                processed_c = _process_txt(tokenized_c, stop_words)
+                duplicate_c = [w for w in worked_companies
+                                 if processed_c == _process_txt(word_tokenize(w.lower()), stop_words)]
+                if duplicate_c:
+                    continue
+                if processed_c in line:
                     # TODO: Rewrite skills detection logic
+                    # Check if company name matches any in skill list
                     cond1 = [t for t in tokenized_c if t in lc_skills]
                     if not cond1:
                         worked_companies.append(c)
                         continue
+
+                    # Company name contains words which match a skill
+                    # RegEx to find spl chars
                     spl_chars_regex = re.compile('|'.join(map(re.escape, spl_chars)))
+                    # Company name without punctuation
                     processed_c2 = spl_chars_regex.sub("", c.lower())
-                    cond2 = processed_c2 in line.lower()
+                    # Check if company name with suffix in line
+                    cond2 = processed_c2 in line
                     if cond1 and cond2:
                         worked_companies.append(c)
 
@@ -453,14 +478,25 @@ def extract_skills(string_to_search):
     for line in string_to_search:
         processed_text = [text.lower() for text in word_tokenize(line) if text not in stop_words]
         found_skills += [s for s in skills if s.lower() in processed_text and s not in found_skills]
+
+    skill_count = {}
+    for skill in found_skills:
+        skill_count[skill] = found_skills.count(skill)
+
+    print("\n===============\n" + str(skill_count) + "\n===============\n")
     return list(set(found_skills))
 
 
 def print_distance(name, email):
-    print('\n==================')
+    orig_name = name
+    orig_email = email
     name = name.replace(' ', '').lower()
     if email:
         email = email.split('@')[0]
         email = re.sub(r'[\.-_0-9]+', '', email)
-        print('Distance between ' + name + ' and '+ email + ' is ' + str(editdistance.eval(name, email)))
-    print('==================\n')
+        score = str(editdistance.eval(name, email))
+
+        # with open('ne_distance.csv', 'a') as csvfile:
+        #     fieldnames = ['name', 'email', 'score']
+        #     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        #     writer.writerow({'name': orig_name, 'email': orig_email, 'score' : score})
