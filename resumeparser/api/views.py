@@ -35,33 +35,27 @@ class ResumeViewSet(DefaultsMixin, ModelViewSet):
     def perform_create(self, serializer):
         uploaded_file = self.request.data.get('datafile')
         serializer.save(datafile=uploaded_file)
-        if uploaded_file.name.endswith('docx'):
-            resume_lines = cvparser.convert_docx_to_txt(uploaded_file)
-        else:
-            resume_lines = cvparser.convert_pdf_to_txt(uploaded_file)
-        resume = {
-            'name': cvparser.extract_name(resume_lines),
-            'email': cvparser.extract_email(resume_lines),
-            'phone_number': cvparser.extract_phone_number(resume_lines),
-            'street_address': cvparser.extract_address(resume_lines),
-            'state': cvparser.extract_state(resume_lines),
-            'zipcode': cvparser.extract_zip(resume_lines),
-            'education': ', '.join(cvparser.extract_edu_info(resume_lines)),
-            'degree': ', '.join(cvparser.extract_degree_info(resume_lines)),
-            'work_history': ', '.join(cvparser.extract_company_info(resume_lines)),
-            'skills': ', '.join(cvparser.extract_skills(resume_lines)),
-            'file_id': serializer.data['id']
-        }
-        cvparser.print_distance(resume['name'], resume['email'])
-        resume_serializer = ResumeSerializer(data=resume)
+
+        resume_data = cvparser.process(uploaded_file)
+        response_data = resume_data.copy()
+        # TODO: Remove after proper DB is added
+        if resume_data:
+            resume_data['file_id'] = serializer.data['id']
+            resume_data['education'] = ', '.join(resume_data['education'])
+            resume_data['degree'] = ', '.join(resume_data['degree'])
+            resume_data['work_history'] = ''
+            # resume_data['work_history'] = ', '.join(resume_data['work_history'])
+            resume_data['skills'] = ', '.join(resume_data['skills'])
+
+        resume_serializer = ResumeSerializer(data=resume_data)
         if resume_serializer.is_valid():
             resume_serializer.save()
 
-        return resume_serializer
+        return response_data
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        resume_serializer = self.perform_create(serializer)
+        response_data = self.perform_create(serializer)
         headers = self.get_success_headers(serializer.data)
-        return Response(resume_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+        return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)

@@ -11,12 +11,13 @@ from io import StringIO
 
 from commonregex import street_address
 
+import datefinder
+
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 
 from elasticsearch import Elasticsearch
 
-import csv
 import sqlite3
 
 conn = sqlite3.connect('respars.sqlite3')
@@ -24,6 +25,7 @@ skills = [s[1] for s in conn.execute("SELECT * FROM SKILLS")]
 ignore_words = [iw[0] for iw in conn.execute("SELECT IgnoreWord FROM ignore_words")]
 conn.close()
 
+import csv
 import editdistance
 
 logging.basicConfig(level=logging.ERROR)
@@ -388,8 +390,21 @@ def extract_degree_info(string_to_search):
         logging.error('Issue extracting degree info:: ' + str(e))
         return []
 
+
 def _process_txt(tokens, stop_words):
     return ' '.join([word for word in tokens if word not in stop_words])
+
+
+def _get_date_range(string_to_search, start_idx):
+    resume_len = len(string_to_search)
+    text_to_search = string_to_search[start_idx]
+    if (start_idx + 1) < resume_len:
+        text_to_search = text_to_search + ' ' + string_to_search[start_idx + 1]
+        if (start_idx + 2) < resume_len:
+            text_to_search = text_to_search + ' ' + string_to_search[start_idx + 2]
+
+    dates = list(datefinder.find_dates(text_to_search))
+    return dates
 
 
 def extract_company_info(string_to_search):
@@ -401,15 +416,14 @@ def extract_company_info(string_to_search):
         lc_skills = [s.lower() for s in skills]
         spl_chars = ['.', ',', '"', "'", '?', '!', ':', ';', '(', ')', '[', ']', '{', '}']
         company_suffixes = ["corporation", "company", "incorporated", "limited", "co", "ltd"
-                            "corp", "inc", "llc", "lc", "llp",
-                            "psc", "pllc", "plc"]
+                            "corp", "inc", "llc", "lc", "llp", "psc", "pllc", "plc"]
         stop_words = set()
         stop_words.update(spl_chars)
         stop_words.update(company_suffixes)
 
         string_to_search = _get_segment(string_to_search, header_indices['work'], header_indices['education'])
 
-        for line in string_to_search:
+        for i, line in enumerate(string_to_search):
 
             if len(line.split()) > 10:
                 continue
@@ -439,31 +453,48 @@ def extract_company_info(string_to_search):
                 tokenized_c = word_tokenize(c.lower())
                 # Company name without punctuations or suffixes
                 processed_c = _process_txt(tokenized_c, stop_words)
-                duplicate_c = [w for w in worked_companies
+                company_values = [w['name'] for w in worked_companies]
+                duplicate_c = [w for w in company_values
                                  if processed_c == _process_txt(word_tokenize(w.lower()), stop_words)]
                 if duplicate_c:
                     continue
+
                 if processed_c in line:
-                    # TODO: Rewrite skills detection logic
-                    # Check if company name matches any in skill list
-                    cond1 = [t for t in tokenized_c if t in lc_skills]
-                    if not cond1:
-                        worked_companies.append(c)
+                    work_period = _get_date_range(string_to_search, i)
+                    if not work_period:
                         continue
 
-                    # Company name contains words which match a skill
-                    # RegEx to find spl chars
-                    spl_chars_regex = re.compile('|'.join(map(re.escape, spl_chars)))
-                    # Company name without punctuation
-                    processed_c2 = spl_chars_regex.sub("", c.lower())
-                    # Check if company name with suffix in line
-                    cond2 = processed_c2 in line
-                    if cond1 and cond2:
-                        worked_companies.append(c)
+                    company_data = {
+                        'name': c,
+                        'start_date': work_period[0]
+                    }
+
+                    if len(work_period) > 1:
+                        company_data['end_date'] = work_period[1]
+
+                    worked_companies.append(company_data)
+
+                # if processed_c in line:
+                #     # TODO: Rewrite skills detection logic
+                #     # Check if company name matches any in skill list
+                #     cond1 = [t for t in tokenized_c if t in lc_skills]
+                #     if not cond1:
+                #         worked_companies.append(c)
+                #         continue
+                #
+                #     # Company name contains words which match a skill
+                #     # RegEx to find spl chars
+                #     spl_chars_regex = re.compile('|'.join(map(re.escape, spl_chars)))
+                #     # Company name without punctuation
+                #     processed_c2 = spl_chars_regex.sub("", c.lower())
+                #     # Check if company name with suffix in line
+                #     cond2 = processed_c2 in line
+                #     if cond1 and cond2:
+                #         worked_companies.append(c)
 
             companies += worked_companies
 
-        return list(set(companies))
+        return companies
 
     except Exception as e:
         logging.error('Issue extracting company info:: ' + str(e))
@@ -487,16 +518,40 @@ def extract_skills(string_to_search):
     return list(set(found_skills))
 
 
-def print_distance(name, email):
-    orig_name = name
-    orig_email = email
-    name = name.replace(' ', '').lower()
-    if email:
-        email = email.split('@')[0]
-        email = re.sub(r'[\.-_0-9]+', '', email)
-        score = str(editdistance.eval(name, email))
+def process(file):
+    if file.name.endswith('docx'):
+        resume_lines = convert_docx_to_txt(file)
+    elif file.name.endswith('pdf'):
+        resume_lines = convert_pdf_to_txt(file)
+    else:
+        return None
 
-        # with open('ne_distance.csv', 'a') as csvfile:
-        #     fieldnames = ['name', 'email', 'score']
-        #     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        #     writer.writerow({'name': orig_name, 'email': orig_email, 'score' : score})
+    resume_data = {
+        'name': extract_name(resume_lines),
+        'email': extract_email(resume_lines),
+        'phone_number': extract_phone_number(resume_lines),
+        'street_address': extract_address(resume_lines),
+        'state': extract_state(resume_lines),
+        'zipcode': extract_zip(resume_lines),
+        'education': extract_edu_info(resume_lines),
+        'degree': extract_degree_info(resume_lines),
+        'work_history': extract_company_info(resume_lines),
+        'skills': extract_skills(resume_lines),
+    }
+
+    return resume_data
+
+
+# def print_distance(name, email):
+#     orig_name = name
+#     orig_email = email
+#     name = name.replace(' ', '').lower()
+#     if email:
+#         email = email.split('@')[0]
+#         email = re.sub(r'[\.-_0-9]+', '', email)
+#         score = str(editdistance.eval(name, email))
+#
+#         with open('ne_distance.csv', 'a') as csvfile:
+#             fieldnames = ['name', 'email', 'score']
+#             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+#             writer.writerow({'name': orig_name, 'email': orig_email, 'score' : score})
