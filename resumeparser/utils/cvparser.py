@@ -26,7 +26,6 @@ skills_list = [s[1] for s in conn.execute("SELECT * FROM SKILLS")]
 ignore_words = [iw[0] for iw in conn.execute("SELECT IgnoreWord FROM ignore_words")]
 conn.close()
 
-import editdistance
 
 logging.basicConfig(level=logging.ERROR)
 
