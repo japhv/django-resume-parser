@@ -48,8 +48,8 @@ class ResumeViewSet(DefaultsMixin, ModelViewSet):
             resume_data['skills'] = ', '.join(resume_data['skills'])
 
         resume_serializer = ResumeSerializer(data=resume_data)
-        if resume_serializer.is_valid():
-            resume_serializer.save()
+        # if resume_serializer.is_valid():
+            # resume_serializer.save()
 
         return response_data
 

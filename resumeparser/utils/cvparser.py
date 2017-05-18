@@ -142,20 +142,155 @@ accomplishments = (
 )
 
 
-def _ismatch(matchlist, search_string):
-    search_string = search_string.lower()
-    for item in matchlist:
-        if item in search_string:
-            return True
-    return False
+def process(file):
+    """
+    Main function to process resume file to json.
+    :param file: Resume file
+    :return: resume_data: Parsed resume dictionary
+    """
+    if file.name.endswith('docx'):
+        resume_lines = convert_docx_to_txt(file)
+    elif file.name.endswith('pdf'):
+        resume_lines = convert_pdf_to_txt(file)
+    else:
+        return None
+
+    resume_segments = segment(resume_lines)
+
+    resume_data = {
+        'contact_info': get_contact_info(resume_segments),
+        'education': extract_edu_info(resume_segments, resume_lines[:]),
+        'degree': extract_degree_info(resume_segments, resume_lines[:]),
+        'work_history': extract_company_info(resume_segments, resume_lines[:]),
+        'skills': extract_skills(resume_segments, resume_lines[:]),
+    }
+
+    return resume_data
 
 
-def flatten_dict(list_dict):
+def segment(string_to_search):
+    resume_segments = {
+        'objective': {},
+        'work_and_employment': {},
+        'education_and_training': {},
+        'skills': {},
+        'accomplishments': {},
+        'misc': {}
+    }
+
+    resume_indices = []
+
+    find_segment_indices(string_to_search, resume_segments, resume_indices)
+    slice_segments(string_to_search, resume_segments, resume_indices)
+
+    pretty(resume_segments)
+    return resume_segments
+
+
+def find_segment_indices(string_to_search, resume_segments, resume_indices):
+    for i, line in enumerate(string_to_search):
+
+        if line[0].islower():
+            continue
+
+        header = line.lower()
+        if [o for o in objective if header.startswith(o)]:
+            resume_indices.append(i)
+            header = [o for o in objective if header.startswith(o)][0]
+            resume_segments['objective'][header] = i
+        elif [w for w in work_and_employment if header.startswith(w)]:
+            resume_indices.append(i)
+            header = [w for w in work_and_employment if header.startswith(w)][0]
+            resume_segments['work_and_employment'][header] = i
+        elif [e for e in education_and_training if header.startswith(e)]:
+            resume_indices.append(i)
+            header = [e for e in education_and_training if header.startswith(e)][0]
+            resume_segments['education_and_training'][header] = i
+        elif [s for s in skills_header if header.startswith(s)]:
+            resume_indices.append(i)
+            header = [s for s in skills_header if header.startswith(s)][0]
+            resume_segments['skills'][header] = i
+        elif [m for m in misc if header.startswith(m)]:
+            resume_indices.append(i)
+            header = [m for m in misc if header.startswith(m)][0]
+            resume_segments['misc'][header] = i
+        elif [a for a in accomplishments if header.startswith(a)]:
+            resume_indices.append(i)
+            header = [a for a in accomplishments if header.startswith(a)][0]
+            resume_segments['accomplishments'][header] = i
+
+
+def slice_segments(string_to_search, resume_segments, resume_indices):
+    resume_segments['contact_info'] = string_to_search[:resume_indices[0]]
+
+    for section, value in resume_segments.items():
+        if section == 'contact_info':
+            continue
+
+        for sub_section, start_idx in value.items():
+            end_idx = len(string_to_search)
+            if (resume_indices.index(start_idx) + 1) != len(resume_indices):
+                end_idx = resume_indices[resume_indices.index(start_idx) + 1]
+
+            resume_segments[section][sub_section] = string_to_search[start_idx:end_idx]
+
+
+def get_contact_info(resume_segments):
+    """
+    Constructs and returns contact_info dictionary.
+    :param resume_segments: Dictionary of segmented resume data
+    :return: contact_info: Dictionary containing contact info
+    """
+    contact_info = {
+        'person_name': {},
+        'contact_method': {}
+    }
+    # Parse person's name
+    contact_info['person_name']['full_name'] = extract_name(resume_segments)
+    if contact_info['person_name']['full_name']:
+        tokenized_name = contact_info['person_name']['full_name'].split()
+        contact_info['person_name']['given_name'] = tokenized_name[0]
+        contact_info['person_name']['family_name'] = tokenized_name[-1]
+    # Parse contact method
+    contact_info['contact_method']['telephone'] = extract_phone_number(resume_segments)
+    contact_info['contact_method']['email'] = extract_email(resume_segments)
+    contact_info['contact_method']['address'] = {
+        'street_address': extract_address(resume_segments),
+        'state': extract_state(resume_segments),
+        'zipcode': extract_zip(resume_segments)
+    }
+
+    return contact_info
+
+
+def _process_txt(tokens, stop_words):
+    return ' '.join([word for word in tokens if word not in stop_words])
+
+
+def _flatten_dict(list_dict):
     list_values = []
     for key, val in list_dict.items():
-        list_values += val
+        if isinstance(val, list):
+            list_values += val
 
     return list_values
+
+
+def _get_date_range(string_to_search, start_idx):
+    resume_len = len(string_to_search)
+    text_to_search = string_to_search[start_idx]
+    if (start_idx + 1) < resume_len:
+        text_to_search = text_to_search + ' ' + string_to_search[start_idx + 1]
+        if (start_idx + 2) < resume_len:
+            text_to_search = text_to_search + ' ' + string_to_search[start_idx + 2]
+
+    # list of dates found
+    dates = list(datefinder.find_dates(text_to_search))
+    # Sanity test for dates
+    dates = [date for date in dates
+             if datetime.datetime(year=1960, month=1,day=1) < date < datetime.datetime.today()]
+
+    return dates
 
 
 def convert_docx_to_txt(docx_file):
@@ -383,11 +518,11 @@ def extract_edu_info(resume_segments, string_to_search):
 
         edu_info = resume_segments['education_and_training']
         if edu_info:
-            string_to_search = flatten_dict(edu_info)
+            string_to_search = _flatten_dict(edu_info)
 
         for line in string_to_search:
 
-            if not _ismatch(university_words, line):
+            if not [uw for uw in university_words if uw in line.lower()]:
                 continue
 
             body = {
@@ -443,7 +578,7 @@ def extract_degree_info(resume_segments, string_to_search):
 
         edu_info = resume_segments['education_and_training']
         if edu_info:
-            string_to_search = flatten_dict(edu_info)
+            string_to_search = _flatten_dict(edu_info)
 
         for line in string_to_search:
             if len(line.split()) > 15:
@@ -465,31 +600,10 @@ def extract_degree_info(resume_segments, string_to_search):
         return []
 
 
-def _process_txt(tokens, stop_words):
-    return ' '.join([word for word in tokens if word not in stop_words])
-
-
-def _get_date_range(string_to_search, start_idx):
-    resume_len = len(string_to_search)
-    text_to_search = string_to_search[start_idx]
-    if (start_idx + 1) < resume_len:
-        text_to_search = text_to_search + ' ' + string_to_search[start_idx + 1]
-        if (start_idx + 2) < resume_len:
-            text_to_search = text_to_search + ' ' + string_to_search[start_idx + 2]
-
-    # list of dates found
-    dates = list(datefinder.find_dates(text_to_search))
-    # Sanity test for dates
-    dates = [date for date in dates if datetime.datetime(year=1960, month=1,day=1) < date < datetime.datetime.today()]
-
-    return dates
-
-
 def extract_company_info(resume_segments, string_to_search):
     try:
         es = Elasticsearch()
         companies = []
-        lc_skills = [s.lower() for s in skills_list]
         spl_chars = ['.', ',', '"', "'", '?', '!', ':', ';', '(', ')', '[', ']', '{', '}']
         company_suffixes = ["corporation", "company", "incorporated", "limited", "co", "ltd",
                             "corp", "inc", "llc", "lc", "llp", "psc", "pllc", "plc"]
@@ -499,7 +613,7 @@ def extract_company_info(resume_segments, string_to_search):
 
         work_info = resume_segments['work_and_employment']
         if work_info:
-            string_to_search = flatten_dict(work_info)
+            string_to_search = _flatten_dict(work_info)
 
         for i, line in enumerate(string_to_search):
 
@@ -538,7 +652,7 @@ def extract_company_info(resume_segments, string_to_search):
                 tokenized_c = word_tokenize(c.lower())
                 # Company name without punctuations or suffixes
                 processed_c = _process_txt(tokenized_c, stop_words)
-                company_values = [w['name'] for w in worked_companies]
+                company_values = [w['organization'] for w in worked_companies]
 
                 # Check for duplicates
                 duplicate_c = [w for w in company_values
@@ -557,7 +671,7 @@ def extract_company_info(resume_segments, string_to_search):
 
                     # Company data dictionary
                     company_data = {
-                        'name': c,
+                        'organization': c,
                         'start_date': work_period[0]
                     }
 
@@ -580,7 +694,7 @@ def extract_company_info(resume_segments, string_to_search):
 def extract_skills(resume_segments, string_to_search):
     skills_dict = resume_segments['skills']
     if skills_dict:
-        string_to_search = flatten_dict(skills_dict)
+        string_to_search = _flatten_dict(skills_dict)
 
     stop_words = set(stopwords.words('english'))
     stop_words.update(['.', ',', '"', "'", '?', '!', ':', ';', '(', ')', '[', ']', '{', '}'])
@@ -598,108 +712,13 @@ def extract_skills(resume_segments, string_to_search):
 
 
 def pretty(d, indent=0):
+   # TODO: For debug purpose. Remove before production
    for key, value in d.items():
       print('\t' * indent + str(key))
       if isinstance(value, dict):
          pretty(value, indent+1)
       else:
          print('\t' * (indent+1) + str(value))
-
-
-def find_segment_indices(string_to_search, resume_segments, resume_indices):
-    for i, line in enumerate(string_to_search):
-
-        if line[0].islower():
-            continue
-
-        header = line.lower()
-        if [o for o in objective if header.startswith(o)]:
-            resume_indices.append(i)
-            header = [o for o in objective if header.startswith(o)][0]
-            resume_segments['objective'][header] = i
-        elif [w for w in work_and_employment if header.startswith(w)]:
-            resume_indices.append(i)
-            header = [w for w in work_and_employment if header.startswith(w)][0]
-            resume_segments['work_and_employment'][header] = i
-        elif [e for e in education_and_training if header.startswith(e)]:
-            resume_indices.append(i)
-            header = [e for e in education_and_training if header.startswith(e)][0]
-            resume_segments['education_and_training'][header] = i
-        elif [s for s in skills_header if header.startswith(s)]:
-            resume_indices.append(i)
-            header = [s for s in skills_header if header.startswith(s)][0]
-            resume_segments['skills'][header] = i
-        elif [m for m in misc if header.startswith(m)]:
-            resume_indices.append(i)
-            header = [m for m in misc if header.startswith(m)][0]
-            resume_segments['misc'][header] = i
-        elif [a for a in accomplishments if header.startswith(a)]:
-            resume_indices.append(i)
-            header = [a for a in accomplishments if header.startswith(a)][0]
-            resume_segments['accomplishments'][header] = i
-
-
-def slice_segments(string_to_search, resume_segments, resume_indices):
-    resume_segments['contact_info'] = string_to_search[:resume_indices[0]]
-
-    for section, value in resume_segments.items():
-        if section == 'contact_info':
-            continue
-
-        for sub_section, start_idx in value.items():
-            end_idx = len(string_to_search)
-            if (resume_indices.index(start_idx) + 1) != len(resume_indices):
-                end_idx = resume_indices[resume_indices.index(start_idx) + 1]
-
-            resume_segments[section][sub_section] = string_to_search[start_idx:end_idx]
-
-
-def segment(string_to_search):
-    resume_segments = {
-        'objective': {},
-        'work_and_employment': {},
-        'education_and_training': {},
-        'skills': {},
-        'accomplishments': {},
-        'misc': {}
-    }
-
-    resume_indices = []
-
-    find_segment_indices(string_to_search, resume_segments, resume_indices)
-    slice_segments(string_to_search, resume_segments, resume_indices)
-
-    pretty(resume_segments)
-    return resume_segments
-
-
-def process(file):
-    if file.name.endswith('docx'):
-        resume_lines = convert_docx_to_txt(file)
-    elif file.name.endswith('pdf'):
-        resume_lines = convert_pdf_to_txt(file)
-    else:
-        return None
-
-    # Set header indices
-    _set_header_indices(resume_lines)
-
-    resume_segments = segment(resume_lines)
-
-    resume_data = {
-        'name': extract_name(resume_segments),
-        'email': extract_email(resume_segments),
-        'phone_number': extract_phone_number(resume_segments),
-        'street_address': extract_address(resume_segments),
-        'state': extract_state(resume_segments),
-        'zipcode': extract_zip(resume_segments),
-        'education': extract_edu_info(resume_segments, resume_lines[:]),
-        'degree': extract_degree_info(resume_segments, resume_lines[:]),
-        'work_history': extract_company_info(resume_segments, resume_lines[:]),
-        'skills': extract_skills(resume_segments, resume_lines[:]),
-    }
-
-    return resume_data
 
 
 # def print_distance(name, email):
